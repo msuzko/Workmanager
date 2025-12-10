@@ -18,39 +18,56 @@ package com.mec.bluromatic.data
 
 import android.content.Context
 import android.net.Uri
+import androidx.lifecycle.asFlow
+import androidx.work.Constraints
 import androidx.work.Data
+import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.mec.bluromatic.IMAGE_MANIPULATION_WORK_NAME
 import com.mec.bluromatic.KEY_BLUR_LEVEL
 import com.mec.bluromatic.KEY_IMAGE_URI
+import com.mec.bluromatic.TAG_OUTPUT
 import com.mec.bluromatic.getImageUri
 import com.mec.bluromatic.workers.BlurWorker
 import com.mec.bluromatic.workers.CleanupWorker
 import com.mec.bluromatic.workers.SaveImageToFileWorker
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.mapNotNull
 
 class WorkManagerBluromaticRepository(context: Context) : BluromaticRepository {
     private var imageUri: Uri = context.getImageUri()
     private val workManager = WorkManager.getInstance(context)
 
-    override val outputWorkInfo: Flow<WorkInfo?> = MutableStateFlow(null)
+    override val outputWorkInfo: Flow<WorkInfo> = workManager.getWorkInfosByTagLiveData(TAG_OUTPUT)
+        .asFlow().mapNotNull { if (it.isNotEmpty()) it.first() else null }
 
     /**
      * Create the WorkRequests to apply the blur and save the resulting image
      * @param blurLevel The amount to blur the image
      */
     override fun applyBlur(blurLevel: Int) {
-        var continuation = workManager.beginWith(OneTimeWorkRequest.from(CleanupWorker::class.java))
+        val constraints = Constraints.Builder()
+            .setRequiresBatteryNotLow(true)
+            .build()
+
+        var continuation = workManager.beginUniqueWork(
+            IMAGE_MANIPULATION_WORK_NAME,
+            ExistingWorkPolicy.REPLACE,
+            OneTimeWorkRequest.from(CleanupWorker::class.java)
+        )
 
         val blurBuilder = OneTimeWorkRequestBuilder<BlurWorker>()
-        blurBuilder.setInputData(createInputDataForWorkRequest(blurLevel, imageUri))
-        continuation = continuation.then(blurBuilder.build())
+            .setInputData(createInputDataForWorkRequest(blurLevel, imageUri))
+            .setConstraints(constraints)
+            .build()
+        continuation = continuation.then(blurBuilder)
 
         val save = OneTimeWorkRequestBuilder<SaveImageToFileWorker>()
-        continuation = continuation.then(save.build())
+            .addTag(TAG_OUTPUT).build()
+        continuation = continuation.then(save)
 
         continuation.enqueue()
     }
@@ -58,7 +75,9 @@ class WorkManagerBluromaticRepository(context: Context) : BluromaticRepository {
     /**
      * Cancel any ongoing WorkRequests
      * */
-    override fun cancelWork() {}
+    override fun cancelWork() {
+        workManager.cancelUniqueWork(IMAGE_MANIPULATION_WORK_NAME)
+    }
 
     /**
      * Creates the input data bundle which includes the blur level to
